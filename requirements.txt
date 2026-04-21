@@ -9,3 +9,4 @@ plotly
 joblib
 python-dotenv
 google-genai
+openai

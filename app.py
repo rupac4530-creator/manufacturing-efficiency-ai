@@ -13,21 +13,40 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-def get_gemini_response(prompt):
-    """Get response from Gemini API with graceful fallback."""
-    try:
-        api_key = os.getenv('GEMINI_API_KEY')
-        if not api_key:
-            return None
-        from google import genai
-        client = genai.Client(api_key=api_key)
-        response = client.models.generate_content(
-            model='gemini-2.0-flash',
-            contents=prompt
-        )
-        return response.text
-    except Exception as e:
-        return None
+def get_ai_response(prompt):
+    """Multi-provider AI with automatic fallback: Gemini → NVIDIA NIM models."""
+    providers = [
+        {"type": "gemini", "key_env": "GEMINI_API_KEY", "model": "gemini-2.0-flash", "name": "Google Gemini"},
+        {"type": "nvidia", "key_env": "NVIDIA_API_KEY_1", "model": "deepseek-ai/deepseek-v3.2", "name": "DeepSeek V3.2"},
+        {"type": "nvidia", "key_env": "NVIDIA_API_KEY_2", "model": "deepseek-ai/deepseek-v3.1-terminus", "name": "DeepSeek V3.1"},
+        {"type": "nvidia", "key_env": "NVIDIA_API_KEY_3", "model": "openai/gpt-oss-20b", "name": "GPT-OSS-20B"},
+        {"type": "nvidia", "key_env": "NVIDIA_API_KEY_4", "model": "openai/gpt-oss-120b", "name": "GPT-OSS-120B"},
+    ]
+    for p in providers:
+        try:
+            api_key = os.getenv(p["key_env"])
+            if not api_key:
+                continue
+            if p["type"] == "gemini":
+                from google import genai
+                client = genai.Client(api_key=api_key)
+                response = client.models.generate_content(model=p["model"], contents=prompt)
+                return response.text
+            else:
+                from openai import OpenAI
+                client = OpenAI(base_url="https://integrate.api.nvidia.com/v1", api_key=api_key)
+                completion = client.chat.completions.create(
+                    model=p["model"],
+                    messages=[{"role": "user", "content": prompt}],
+                    temperature=0.7, top_p=0.9, max_tokens=2048
+                )
+                return completion.choices[0].message.content
+        except Exception:
+            continue
+    return None
+
+# Backward compatibility alias
+get_gemini_response = get_ai_response
 
 st.set_page_config(page_title="Manufacturing Efficiency AI", page_icon="🏭", layout="wide", initial_sidebar_state="expanded")
 
