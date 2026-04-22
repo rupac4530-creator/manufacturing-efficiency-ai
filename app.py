@@ -14,13 +14,14 @@ from dotenv import load_dotenv
 load_dotenv()
 
 def get_ai_response(prompt):
-    """Multi-provider AI with automatic fallback: Gemini → NVIDIA NIM models."""
+    """Multi-provider AI with automatic fallback and 12s timeout per call."""
+    import httpx
     providers = [
-        {"type": "gemini", "key_env": "GEMINI_API_KEY", "model": "gemini-2.0-flash", "name": "Google Gemini"},
         {"type": "nvidia", "key_env": "NVIDIA_API_KEY_1", "model": "deepseek-ai/deepseek-v3.2", "name": "DeepSeek V3.2"},
         {"type": "nvidia", "key_env": "NVIDIA_API_KEY_2", "model": "deepseek-ai/deepseek-v3.1-terminus", "name": "DeepSeek V3.1"},
         {"type": "nvidia", "key_env": "NVIDIA_API_KEY_3", "model": "openai/gpt-oss-20b", "name": "GPT-OSS-20B"},
         {"type": "nvidia", "key_env": "NVIDIA_API_KEY_4", "model": "openai/gpt-oss-120b", "name": "GPT-OSS-120B"},
+        {"type": "gemini", "key_env": "GEMINI_API_KEY", "model": "gemini-2.0-flash", "name": "Google Gemini"},
     ]
     for p in providers:
         try:
@@ -31,19 +32,70 @@ def get_ai_response(prompt):
                 from google import genai
                 client = genai.Client(api_key=api_key)
                 response = client.models.generate_content(model=p["model"], contents=prompt)
-                return response.text
+                if response and response.text:
+                    return response.text
             else:
                 from openai import OpenAI
-                client = OpenAI(base_url="https://integrate.api.nvidia.com/v1", api_key=api_key)
+                http_client = httpx.Client(timeout=httpx.Timeout(12.0, connect=5.0))
+                client = OpenAI(base_url="https://integrate.api.nvidia.com/v1", api_key=api_key, http_client=http_client)
                 completion = client.chat.completions.create(
                     model=p["model"],
                     messages=[{"role": "user", "content": prompt}],
                     temperature=0.7, top_p=0.9, max_tokens=2048
                 )
-                return completion.choices[0].message.content
+                if completion.choices and completion.choices[0].message.content:
+                    return completion.choices[0].message.content
         except Exception:
             continue
     return None
+
+def generate_local_summary(fdf):
+    """Generate a data-driven executive summary from the data itself — no API needed."""
+    total = len(fdf)
+    high_n = len(fdf[fdf['Efficiency_Status']=='High'])
+    med_n = len(fdf[fdf['Efficiency_Status']=='Medium'])
+    low_n = len(fdf[fdf['Efficiency_Status']=='Low'])
+    avg_err = fdf['Error_Rate_%'].mean()
+    avg_spd = fdf['Production_Speed_units_per_hr'].mean()
+    top_machine = fdf.groupby('Machine_ID')['Error_Rate_%'].mean().idxmax()
+    top_err = fdf.groupby('Machine_ID')['Error_Rate_%'].mean().max()
+    return f"""**Executive Summary — Manufacturing Efficiency Analysis**
+
+📊 **Dataset:** {total:,} production records across {fdf['Machine_ID'].nunique()} industrial machines.
+
+📈 **Efficiency Breakdown:** {low_n:,} records ({low_n/total*100:.1f}%) are **Low efficiency**, {med_n:,} ({med_n/total*100:.1f}%) are **Medium**, and only {high_n:,} ({high_n/total*100:.1f}%) are **High** — indicating significant room for improvement.
+
+⚠️ **Key Risk:** The average error rate is **{avg_err:.1f}%**, which is the #1 driver of efficiency classification (32.7% feature importance). Machine **{top_machine}** has the highest average error rate at **{top_err:.1f}%**.
+
+⚡ **Production:** Average output is **{avg_spd:.0f} units/hr**. Machines with error rates below 2% consistently achieve High efficiency status.
+
+🎯 **Recommendation:** Prioritize error rate reduction on the top 5 highest-error machines. Even a 2-3% reduction in error rate can shift machines from Low to Medium efficiency, yielding significant cost savings.
+
+🤖 **Model Performance:** The Random Forest classifier achieves **99.99% accuracy** (5-fold cross-validated), confirming Error Rate as the dominant predictive feature."""
+
+def generate_local_recommendations(fdf):
+    """Generate data-driven recommendations from actual data patterns — no API needed."""
+    low_machines = fdf[fdf['Efficiency_Status']=='Low'].groupby('Machine_ID').size().sort_values(ascending=False).head(5)
+    high_err = fdf.groupby('Machine_ID')['Error_Rate_%'].mean().sort_values(ascending=False).head(3)
+    avg_err = fdf['Error_Rate_%'].mean()
+    avg_def = fdf['Quality_Control_Defect_Rate_%'].mean()
+    recs = f"""**Improvement Recommendations — Data-Driven Action Plan**
+
+**1. 🔴 Reduce Error Rates (Highest Impact — 32.7% importance)**
+Focus on these top error-producing machines: {', '.join([f'Machine {m} ({e:.1f}%)' for m, e in high_err.items()])}. Target: bring error rates below 3% to shift from Low to Medium efficiency.
+
+**2. 🟡 Address Low-Efficiency Machines (77.8% of production)**
+These machines have the most Low-efficiency incidents: {', '.join([f'Machine {m} ({c} incidents)' for m, c in low_machines.items()])}. Schedule maintenance reviews for each.
+
+**3. 🟢 Optimize Production Speed**
+Current average: {fdf['Production_Speed_units_per_hr'].mean():.0f} units/hr. High-efficiency machines average {fdf[fdf['Efficiency_Status']=='High']['Production_Speed_units_per_hr'].mean():.0f} units/hr. Benchmark all machines against this target.
+
+**4. 🔧 Implement Predictive Maintenance**
+Average maintenance score: {fdf['Predictive_Maintenance_Score'].mean():.0f}/100. Machines below 60 should receive immediate attention to prevent degradation.
+
+**5. 📉 Reduce Defect Rate**
+Current average defect rate: {avg_def:.1f}%. Quality-Production Score analysis shows defects directly reduce throughput. Target: below 2% defect rate for all machines."""
+    return recs
 
 # Backward compatibility alias
 get_gemini_response = get_ai_response
@@ -466,15 +518,15 @@ with tab5:
     fig.update_layout(paper_bgcolor='rgba(0,0,0,0)', font_color='#e6f1ff', height=500)
     st.plotly_chart(fig, use_container_width=True)
 
-# ── TAB 6: AI Insights (Gemini) ──
+# ── TAB 6: AI Insights ──
 with tab6:
     st.markdown("## AI-Powered Insights")
-    st.markdown("<p style='color:rgba(148,163,200,0.7);'>Powered by Google Gemini AI — generating intelligent natural-language analysis of your manufacturing data.</p>", unsafe_allow_html=True)
+    st.markdown("<p style='color:rgba(148,163,200,0.7);'>Intelligent analysis powered by NVIDIA NIM + Google Gemini with local data-driven fallback.</p>", unsafe_allow_html=True)
 
     ai_col1, ai_col2 = st.columns(2)
     with ai_col1:
         if st.button("Generate Executive Summary", use_container_width=True, key="btn_exec"):
-            with st.spinner("Gemini is analyzing your data..."):
+            with st.spinner("Generating executive summary..."):
                 total_r = len(fdf)
                 high_p = len(fdf[fdf['Efficiency_Status']=='High']) / max(total_r,1) * 100
                 med_p = len(fdf[fdf['Efficiency_Status']=='Medium']) / max(total_r,1) * 100
@@ -489,15 +541,18 @@ with tab6:
 - Top efficiency driver: Error_Rate (32.7% importance)
 - Best AI model: Random Forest with 99.99% accuracy
 Be professional, data-driven, and actionable."""
-                result = get_gemini_response(prompt)
+                result = get_ai_response(prompt)
                 if result:
                     st.markdown(f"<div class='metric-card' style='text-align:left;padding:24px;'>{result}</div>", unsafe_allow_html=True)
+                    st.caption("✦ Generated by external AI provider")
                 else:
-                    st.warning("Gemini API is temporarily unavailable. Please check your API key quota at https://ai.google.dev")
+                    result = generate_local_summary(fdf)
+                    st.markdown(result)
+                    st.caption("✦ Generated from local data analysis (external AI unavailable)")
 
     with ai_col2:
         if st.button("Generate Improvement Recommendations", use_container_width=True, key="btn_rec"):
-            with st.spinner("Gemini is generating recommendations..."):
+            with st.spinner("Generating recommendations..."):
                 low_machines = fdf[fdf['Efficiency_Status']=='Low'].groupby('Machine_ID').size().sort_values(ascending=False).head(5)
                 top_low = ', '.join([f"{m}: {c} incidents" for m, c in low_machines.items()])
                 prompt = f"""You are a manufacturing efficiency consultant. Based on this analysis, provide 5 specific, actionable recommendations to improve factory efficiency:
@@ -507,17 +562,20 @@ Be professional, data-driven, and actionable."""
 - Network latency has minimal impact
 - Operation modes: Active, Idle, Maintenance all show similar patterns
 Be specific, practical, and prioritize by impact. Use numbered list."""
-                result = get_gemini_response(prompt)
+                result = get_ai_response(prompt)
                 if result:
                     st.markdown(f"<div class='metric-card' style='text-align:left;padding:24px;'>{result}</div>", unsafe_allow_html=True)
+                    st.caption("✦ Generated by external AI provider")
                 else:
-                    st.warning("Gemini API is temporarily unavailable. Please check your API key quota at https://ai.google.dev")
+                    result = generate_local_recommendations(fdf)
+                    st.markdown(result)
+                    st.caption("✦ Generated from local data analysis (external AI unavailable)")
 
     st.markdown("---")
 
     st.markdown("### Ask AI About Your Data")
     user_question = st.text_input("Ask a question about the manufacturing data:", placeholder="e.g., Why is efficiency low for certain machines?")
-    if user_question and st.button("Ask Gemini", use_container_width=True, key="btn_ask"):
+    if user_question and st.button("Ask AI", use_container_width=True, key="btn_ask"):
         with st.spinner("Thinking..."):
             context = f"""Manufacturing dataset context:
 - 100K records, 50 machines, 3 operation modes
@@ -530,14 +588,20 @@ Be specific, practical, and prioritize by impact. Use numbered list."""
 User question: {user_question}
 
 Provide a clear, data-driven answer in 3-4 sentences."""
-            result = get_gemini_response(context)
+            result = get_ai_response(context)
             if result:
                 st.markdown(f"<div class='metric-card' style='text-align:left;padding:24px;'>{result}</div>", unsafe_allow_html=True)
             else:
-                st.warning("Gemini API is temporarily unavailable. Please check your API key quota at https://ai.google.dev")
+                st.info("External AI providers are currently unavailable. Here are key data facts that may answer your question:")
+                st.markdown(f"""
+- **Error Rate** is the #1 efficiency driver (32.7% importance). High-efficiency machines have ~1% error rate vs ~8.9% for Low.
+- **Production Speed** averages {fdf['Production_Speed_units_per_hr'].mean():.0f} units/hr. High-efficiency machines produce {fdf[fdf['Efficiency_Status']=='High']['Production_Speed_units_per_hr'].mean():.0f} units/hr.
+- **{fdf['Machine_ID'].nunique()} machines** monitored. Machine {fdf.groupby('Machine_ID')['Error_Rate_%'].mean().idxmax()} has the highest error rate.
+- **Network latency** ({fdf['Network_Latency_ms'].mean():.1f}ms avg) has minimal impact on efficiency classification.
+""")
 
     st.markdown("---")
-    st.markdown("<p style='color:rgba(148,163,200,0.4);font-size:0.75rem;'>Note: AI Insights are generated by Google Gemini and are supplementary to the core ML analysis. Core predictions use the locally-trained Random Forest model.</p>", unsafe_allow_html=True)
+    st.markdown("<p style='color:rgba(148,163,200,0.4);font-size:0.75rem;'>Note: AI insights try NVIDIA NIM (DeepSeek, GPT-OSS) and Google Gemini. If unavailable, data-driven analysis is shown. Core predictions always use the locally-trained Random Forest model.</p>", unsafe_allow_html=True)
 
 # ── Footer ──
 st.markdown("---")
